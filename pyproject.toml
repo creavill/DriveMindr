@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drivemindr"
+version = "0.1.0"
+description = "AI-Powered Windows Storage Manager — Privacy-First, Fully Offline, Local AI Only"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+]
+dashboard = [
+    "streamlit>=1.28.0",
+    "plotly>=5.18.0",
+]
+ai = [
+    "ollama>=0.1.0",
+]
+
+[project.scripts]
+drivemindr = "drivemindr.main:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+log_cli = true
+log_cli_level = "DEBUG"
+
+[tool.setuptools.packages.find]
+include = ["drivemindr*"]
