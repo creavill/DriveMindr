@@ -4,6 +4,7 @@ DriveMindr CLI — the entry point.
 Usage::
 
     drivemindr scan C:\\
+    drivemindr classify --db ./drivemindr.db
     drivemindr scan C:\\ --db ./my.db --verbose
     drivemindr info --db ./my.db
 
@@ -98,6 +99,93 @@ def scan(
         raise typer.Exit(code=1)
     except Exception:
         logger.exception("Unexpected error during scan")
+        console.print("\n[red]Unexpected error — see drivemindr_debug.log for details.[/red]")
+        raise typer.Exit(code=1)
+    finally:
+        database.close()
+
+
+@app.command()
+def classify(
+    db: str = _db_option,
+    verbose: bool = _verbose_option,
+    model: str = typer.Option("", "--model", "-m", help="Override the Ollama model name."),
+) -> None:
+    """Classify scanned files using the local Ollama AI model.
+
+    Requires Ollama running on localhost:11434. Run 'drivemindr scan' first.
+    """
+    from drivemindr.classifier import FileClassifier, OllamaClient
+
+    database = _init(db, verbose)
+
+    console.print(f"\n[bold]DriveMindr v{__version__}[/bold] — AI classification\n")
+
+    try:
+        file_count = database.file_count()
+        if file_count == 0:
+            console.print("[yellow]No files in database. Run 'drivemindr scan' first.[/yellow]")
+            raise typer.Exit(code=1)
+
+        console.print(f"  Files in DB: [green]{format_count(file_count)}[/green]\n")
+
+        # Build client with optional model override
+        client_kwargs: dict = {}
+        if model:
+            client_kwargs["model"] = model
+        ollama = OllamaClient(**client_kwargs)
+
+        classifier = FileClassifier(database, ollama_client=ollama)
+
+        # Preflight — verify Ollama is up
+        console.print("[dim]Checking Ollama availability...[/dim]")
+        status = classifier.preflight_check()
+        if not status["ollama_up"]:
+            console.print(
+                "\n[red]Ollama is not running.[/red]\n"
+                "  Start it with: [cyan]ollama serve[/cyan]\n"
+                "  Download from: [cyan]ollama.com[/cyan] (install offline)\n"
+            )
+            logger.error("Classify aborted — Ollama not available")
+            raise typer.Exit(code=1)
+
+        if not status["model_ready"]:
+            target = model or "llama3.1:8b"
+            console.print(
+                f"\n[red]Model not found.[/red]\n"
+                f"  Pull it with: [cyan]ollama pull {target}[/cyan]\n"
+            )
+            logger.error("Classify aborted — model not available")
+            raise typer.Exit(code=1)
+
+        console.print("[green]Ollama is ready.[/green]\n")
+
+        # Run classification
+        def _progress(classified: int, overridden: int, errors: int) -> None:
+            console.print(
+                f"  Classified [green]{format_count(classified)}[/green]"
+                f"  |  Safety overrides: [yellow]{overridden}[/yellow]"
+                f"  |  Errors: [red]{errors}[/red]",
+                end="\r",
+            )
+
+        summary = classifier.classify_all(progress_callback=_progress)
+        console.print()  # newline after progress
+
+        table = Table(title="Classification Summary")
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="right")
+        table.add_row("Classified", format_count(summary["classified"]))
+        table.add_row("Safety overrides", format_count(summary["overridden"]))
+        table.add_row("Errors", format_count(summary["errors"]))
+        table.add_row("Batches", format_count(summary["batches"]))
+        console.print(table)
+
+        logger.info("Classify command completed: %s", summary)
+    except typer.Exit:
+        raise
+    except Exception:
+        logger.exception("Unexpected error during classification")
         console.print("\n[red]Unexpected error — see drivemindr_debug.log for details.[/red]")
         raise typer.Exit(code=1)
     finally:
