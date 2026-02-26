@@ -5,6 +5,7 @@ Usage::
 
     drivemindr scan C:\\
     drivemindr classify --db ./drivemindr.db
+    drivemindr dashboard --db ./drivemindr.db
     drivemindr scan C:\\ --db ./my.db --verbose
     drivemindr info --db ./my.db
 
@@ -190,6 +191,52 @@ def classify(
         raise typer.Exit(code=1)
     finally:
         database.close()
+
+
+@app.command()
+def dashboard(
+    db: str = _db_option,
+    port: int = typer.Option(8501, "--port", "-p", help="Streamlit server port."),
+) -> None:
+    """Launch the review dashboard (Streamlit).
+
+    Opens a browser with Drive Overview, Action Review, and Execution Plan views.
+    """
+    import subprocess
+    import shutil
+
+    streamlit_path = shutil.which("streamlit")
+    if streamlit_path is None:
+        console.print(
+            "\n[red]Streamlit is not installed.[/red]\n"
+            "  Install it with: [cyan]pip install streamlit[/cyan]\n"
+        )
+        raise typer.Exit(code=1)
+
+    dashboard_file = Path(__file__).parent / "dashboard.py"
+    if not dashboard_file.exists():
+        console.print("[red]dashboard.py not found.[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"\n[bold]DriveMindr v{__version__}[/bold] — launching dashboard\n")
+    console.print(f"  Database: [cyan]{db}[/cyan]")
+    console.print(f"  URL: [cyan]http://localhost:{port}[/cyan]\n")
+
+    try:
+        subprocess.run(
+            [
+                streamlit_path, "run", str(dashboard_file),
+                "--server.port", str(port),
+                "--server.headless", "true",
+                "--", "--db", db,
+            ],
+            check=True,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[dim]Dashboard stopped.[/dim]")
+    except subprocess.CalledProcessError as exc:
+        logger.error("Streamlit exited with code %d", exc.returncode)
+        raise typer.Exit(code=1)
 
 
 @app.command()

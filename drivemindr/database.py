@@ -276,3 +276,169 @@ class Database:
     def total_size(self) -> int:
         row = self.conn.execute("SELECT COALESCE(SUM(size_bytes),0) FROM files").fetchone()
         return row[0] if row else 0
+
+    # -- classification / dashboard queries -----------------------------------
+
+    def get_classification_summary(self) -> dict[str, Any]:
+        """Return counts and sizes grouped by classification action."""
+        sql = """
+        SELECT
+            c.action,
+            COUNT(*)           AS file_count,
+            SUM(f.size_bytes)  AS total_bytes
+        FROM classifications c
+        JOIN files f ON f.id = c.file_id
+        GROUP BY c.action
+        ORDER BY total_bytes DESC
+        """
+        rows = self.conn.execute(sql).fetchall()
+        return {row["action"]: {"count": row["file_count"], "bytes": row["total_bytes"]} for row in rows}
+
+    def get_files_by_action(
+        self,
+        action: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[sqlite3.Row]:
+        """Return files with a given classification action, joined with classification data."""
+        sql = """
+        SELECT f.*, c.action AS ai_action, c.confidence, c.reason, c.category,
+               c.overridden, c.override_reason, c.classified_at,
+               ud.decision, ud.new_action
+        FROM files f
+        JOIN classifications c ON c.file_id = f.id
+        LEFT JOIN user_decisions ud ON ud.file_id = f.id
+        WHERE c.action = ?
+        ORDER BY f.size_bytes DESC
+        LIMIT ? OFFSET ?
+        """
+        return self.conn.execute(sql, (action, limit, offset)).fetchall()
+
+    def get_unreviewed_files(self, *, limit: int = 500) -> list[sqlite3.Row]:
+        """Return classified files that the user hasn't reviewed yet."""
+        sql = """
+        SELECT f.*, c.action AS ai_action, c.confidence, c.reason, c.category,
+               c.overridden, c.override_reason
+        FROM files f
+        JOIN classifications c ON c.file_id = f.id
+        LEFT JOIN user_decisions ud ON ud.file_id = f.id
+        WHERE ud.id IS NULL
+        ORDER BY
+            CASE c.action
+                WHEN 'DELETE_JUNK' THEN 1
+                WHEN 'DELETE_UNUSED' THEN 2
+                WHEN 'MOVE_DATA' THEN 3
+                WHEN 'MOVE_APP' THEN 4
+                WHEN 'ARCHIVE' THEN 5
+                ELSE 6
+            END,
+            f.size_bytes DESC
+        LIMIT ?
+        """
+        return self.conn.execute(sql, (limit,)).fetchall()
+
+    def get_approved_actions(self) -> list[sqlite3.Row]:
+        """Return files approved for execution (user decision = APPROVE)."""
+        sql = """
+        SELECT f.*, c.action AS ai_action, c.confidence,
+               ud.decision, ud.new_action,
+               COALESCE(ud.new_action, c.action) AS final_action
+        FROM files f
+        JOIN classifications c ON c.file_id = f.id
+        JOIN user_decisions ud ON ud.file_id = f.id
+        WHERE ud.decision = 'APPROVE'
+        ORDER BY
+            CASE COALESCE(ud.new_action, c.action)
+                WHEN 'DELETE_JUNK' THEN 1
+                WHEN 'DELETE_UNUSED' THEN 2
+                WHEN 'MOVE_DATA' THEN 3
+                WHEN 'MOVE_APP' THEN 4
+                WHEN 'ARCHIVE' THEN 5
+                ELSE 6
+            END,
+            f.size_bytes DESC
+        """
+        return self.conn.execute(sql).fetchall()
+
+    def save_user_decision(
+        self, file_id: int, decision: str, new_action: str | None = None,
+    ) -> None:
+        """Store a user decision (APPROVE, REJECT, CHANGE, PROTECT)."""
+        sql = """
+        INSERT INTO user_decisions (file_id, decision, new_action)
+        VALUES (?, ?, ?)
+        ON CONFLICT(file_id) DO UPDATE SET
+            decision=excluded.decision,
+            new_action=excluded.new_action,
+            decided_at=datetime('now','localtime')
+        """
+        with self.transaction() as cur:
+            cur.execute(sql, (file_id, decision, new_action))
+
+    def save_batch_decisions(
+        self, file_ids: list[int], decision: str, new_action: str | None = None,
+    ) -> int:
+        """Store the same decision for multiple files. Returns count saved."""
+        sql = """
+        INSERT INTO user_decisions (file_id, decision, new_action)
+        VALUES (?, ?, ?)
+        ON CONFLICT(file_id) DO UPDATE SET
+            decision=excluded.decision,
+            new_action=excluded.new_action,
+            decided_at=datetime('now','localtime')
+        """
+        with self.transaction() as cur:
+            cur.executemany(sql, [(fid, decision, new_action) for fid in file_ids])
+            return cur.rowcount
+
+    def get_review_stats(self) -> dict[str, int]:
+        """Return counts of classified, reviewed, and approved files."""
+        classified = self.conn.execute(
+            "SELECT COUNT(*) FROM classifications"
+        ).fetchone()[0]
+        reviewed = self.conn.execute(
+            "SELECT COUNT(*) FROM user_decisions"
+        ).fetchone()[0]
+        approved = self.conn.execute(
+            "SELECT COUNT(*) FROM user_decisions WHERE decision = 'APPROVE'"
+        ).fetchone()[0]
+        rejected = self.conn.execute(
+            "SELECT COUNT(*) FROM user_decisions WHERE decision = 'REJECT'"
+        ).fetchone()[0]
+        return {
+            "classified": classified,
+            "reviewed": reviewed,
+            "approved": approved,
+            "rejected": rejected,
+            "pending": classified - reviewed,
+        }
+
+    def get_space_recovery_estimate(self) -> dict[str, int]:
+        """Estimate recoverable space by action category."""
+        sql = """
+        SELECT
+            c.action,
+            SUM(f.size_bytes) AS recoverable_bytes
+        FROM classifications c
+        JOIN files f ON f.id = c.file_id
+        WHERE c.action IN ('DELETE_JUNK', 'DELETE_UNUSED', 'ARCHIVE')
+        GROUP BY c.action
+        """
+        rows = self.conn.execute(sql).fetchall()
+        result: dict[str, int] = {}
+        for row in rows:
+            result[row["action"]] = row["recoverable_bytes"]
+        return result
+
+    def get_extension_breakdown(self) -> list[sqlite3.Row]:
+        """Return file count and total size grouped by extension (top 20)."""
+        sql = """
+        SELECT extension, COUNT(*) AS file_count, SUM(size_bytes) AS total_bytes
+        FROM files
+        WHERE extension IS NOT NULL AND extension != '' AND is_dir = 0
+        GROUP BY extension
+        ORDER BY total_bytes DESC
+        LIMIT 20
+        """
+        return self.conn.execute(sql).fetchall()
