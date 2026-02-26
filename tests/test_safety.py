@@ -362,3 +362,132 @@ class TestCompositeScenarios:
         assert verdict.original_action == "DELETE_JUNK"
         assert verdict.final_action == "KEEP"
         assert verdict.was_modified is True
+
+    def test_sensitive_env_with_high_confidence_still_blocked(self, engine: SafetyEngine) -> None:
+        """Even 100% confidence can't delete a .env file."""
+        verdict = engine.check(
+            r"C:\Projects\app\.env.production",
+            ai_action="DELETE_JUNK",
+            ai_confidence=1.0,
+        )
+        assert verdict.final_action == "KEEP"
+        assert verdict.is_sensitive is True
+
+    def test_guardian_plus_low_confidence(self, engine: SafetyEngine) -> None:
+        """A .docx with DELETE at low confidence gets double protection."""
+        verdict = engine.check(
+            r"C:\Users\Conner\Documents\thesis.docx",
+            ai_action="DELETE_JUNK",
+            ai_confidence=0.3,
+            extension=".docx",
+        )
+        assert verdict.final_action == "KEEP"
+        assert verdict.is_guardian_protected is True
+
+    def test_all_document_extensions_protected(self, engine: SafetyEngine) -> None:
+        """Verify every document extension in the config is actually blocked."""
+        from drivemindr.config import DOCUMENT_EXTENSIONS
+        for ext in DOCUMENT_EXTENSIONS:
+            verdict = engine.check(
+                f"C:\\Users\\test\\file{ext}",
+                ai_action="DELETE_JUNK",
+                ai_confidence=0.99,
+                extension=ext,
+            )
+            assert verdict.final_action == "KEEP", f"{ext} was not protected!"
+            assert verdict.is_guardian_protected is True, f"{ext} not guardian-flagged!"
+
+    def test_all_photo_video_extensions_protected(self, engine: SafetyEngine) -> None:
+        """Verify every photo/video extension is blocked from deletion."""
+        from drivemindr.config import PHOTO_VIDEO_EXTENSIONS
+        for ext in PHOTO_VIDEO_EXTENSIONS:
+            verdict = engine.check(
+                f"C:\\Users\\test\\file{ext}",
+                ai_action="DELETE_UNUSED",
+                ai_confidence=0.99,
+                extension=ext,
+            )
+            assert verdict.final_action == "KEEP", f"{ext} was not protected!"
+
+    def test_all_source_code_extensions_protected(self, engine: SafetyEngine) -> None:
+        """Verify every source code extension is blocked from deletion."""
+        from drivemindr.config import SOURCE_CODE_EXTENSIONS
+        for ext in SOURCE_CODE_EXTENSIONS:
+            verdict = engine.check(
+                f"C:\\Projects\\file{ext}",
+                ai_action="DELETE_JUNK",
+                ai_confidence=0.99,
+                extension=ext,
+            )
+            assert verdict.final_action == "KEEP", f"{ext} was not protected!"
+
+    def test_all_protected_paths_enforced(self, engine: SafetyEngine) -> None:
+        """Verify every path in PROTECTED_PATHS is actually blocked."""
+        from drivemindr.config import PROTECTED_PATHS
+        for path in PROTECTED_PATHS:
+            test_file = path + r"\test.dll"
+            verdict = engine.check(
+                test_file,
+                ai_action="DELETE_JUNK",
+                ai_confidence=1.0,
+            )
+            assert verdict.final_action == "KEEP", f"Path {path} was not protected!"
+            assert verdict.is_protected is True
+
+    def test_all_sensitive_patterns_detected(self, engine: SafetyEngine) -> None:
+        """Verify every sensitive pattern is correctly detected."""
+        from drivemindr.config import SENSITIVE_FILE_PATTERNS
+        for pattern in SENSITIVE_FILE_PATTERNS:
+            # Create a filename that contains the pattern
+            test_file = f"C:\\test\\{pattern}"
+            assert engine.is_sensitive_file(test_file), f"Pattern '{pattern}' not detected!"
+
+
+# ---------------------------------------------------------------------------
+# Integration: no network calls during classification
+# ---------------------------------------------------------------------------
+
+class TestNoNetworkCalls:
+    """Verify that the classifier + safety pipeline makes no external network calls."""
+
+    def test_no_network_calls_during_classification(self) -> None:
+        """Mock Ollama and verify no real network calls are made."""
+        from unittest.mock import MagicMock, patch
+        import json
+        from drivemindr.classifier import FileClassifier, OllamaClient
+        from drivemindr.database import Database
+        from pathlib import Path
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.connect()
+
+            # Insert a test file
+            db.upsert_file({
+                "path": r"C:\test.txt", "name": "test.txt",
+                "extension": ".txt", "size_bytes": 100,
+                "created": "2024-01-01", "modified": "2024-06-01",
+                "accessed": "2024-12-01", "owner": "TestUser",
+                "is_readonly": 0, "is_dir": 0,
+                "parent_dir": r"C:\test", "scan_id": "test",
+            })
+
+            # Mock the Ollama client — no real HTTP calls
+            mock_client = MagicMock(spec=OllamaClient)
+            mock_client.is_available.return_value = True
+            mock_client.has_model.return_value = True
+            mock_client.generate.return_value = json.dumps([{
+                "path": r"C:\test.txt", "action": "KEEP",
+                "confidence": 0.9, "reason": "ok", "category": "doc",
+            }])
+
+            classifier = FileClassifier(db, ollama_client=mock_client)
+
+            # Patch urllib to catch any real network calls
+            with patch("urllib.request.urlopen") as mock_urlopen:
+                classifier.classify_all()
+                # urllib should NOT have been called (we used mock client)
+                mock_urlopen.assert_not_called()
+
+            db.close()

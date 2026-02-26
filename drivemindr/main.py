@@ -400,6 +400,70 @@ def version() -> None:
     console.print(f"DriveMindr v{__version__}")
 
 
+@app.command()
+def setup() -> None:
+    """Run the first-run setup wizard.
+
+    Checks Python, Ollama, drives, admin privileges, and network isolation.
+    """
+    from scripts.first_run import run_wizard
+
+    success = run_wizard()
+    if not success:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def check_network(
+    paranoid: bool = typer.Option(
+        False, "--paranoid", help="Disable all non-loopback network interfaces.",
+    ),
+) -> None:
+    """Verify network isolation — no outbound connections.
+
+    Use --paranoid to disable non-loopback network interfaces during execution.
+    """
+    from drivemindr.network import (
+        check_outbound_connections,
+        paranoid_mode,
+        verify_dns_not_leaking,
+    )
+
+    console.print(f"\n[bold]DriveMindr v{__version__}[/bold] — network check\n")
+
+    result = check_outbound_connections()
+    if result.safe:
+        console.print("  [green]No suspicious outbound connections.[/green]")
+    else:
+        console.print(
+            f"  [red]{len(result.suspicious_connections)} suspicious connections:[/red]"
+        )
+        for conn in result.suspicious_connections:
+            console.print(
+                f"    {conn['process']} -> {conn['remote_ip']}:{conn['remote_port']}"
+            )
+
+    dns_ok = verify_dns_not_leaking()
+    if dns_ok:
+        console.print("  [green]DNS check passed — no interception detected.[/green]")
+    else:
+        console.print("  [yellow]DNS interception detected — traffic may be monitored.[/yellow]")
+
+    if paranoid:
+        console.print("\n  [yellow]Enabling paranoid mode — disabling network interfaces...[/yellow]")
+        p_result = paranoid_mode(enable=True)
+        if p_result.interfaces_disabled:
+            for name in p_result.interfaces_disabled:
+                console.print(f"    Disabled: [cyan]{name}[/cyan]")
+            console.print(
+                "\n  [dim]Re-enable with: drivemindr check-network --no-paranoid[/dim]"
+            )
+        for w in p_result.warnings:
+            console.print(f"  [red]{w}[/red]")
+
+    console.print()
+
+
 # ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
