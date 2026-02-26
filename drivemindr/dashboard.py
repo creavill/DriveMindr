@@ -52,7 +52,12 @@ def _get_db_path() -> str:
 
 @st.cache_resource
 def get_db() -> Database:
-    """Open a shared DB connection for the Streamlit session."""
+    """Open a shared DB connection for the Streamlit session.
+
+    Uses Streamlit's cache_resource to keep one connection per session.
+    SQLite connections are automatically cleaned up on process exit.
+    WAL mode ensures database integrity even without explicit close.
+    """
     db = Database(_get_db_path())
     db.connect()
     return db

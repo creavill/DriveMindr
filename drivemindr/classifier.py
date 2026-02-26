@@ -104,7 +104,11 @@ class OllamaClient:
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode())
                 models = [m.get("name", "") for m in data.get("models", [])]
-                found = any(target in m for m in models)
+                # Match exact name or name without :latest tag
+                found = any(
+                    m == target or m.split(":")[0] == target.split(":")[0]
+                    for m in models
+                )
                 logger.info(
                     "Model check — target=%s found=%s available=%s",
                     target, found, models,

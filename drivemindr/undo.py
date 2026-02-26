@@ -274,5 +274,13 @@ class UndoManager:
         """Compute the trash path for a file being 'deleted'.
 
         Files go to: <trash_dir>/<batch_id>/<original_filename>
+        Handles name collisions by appending a counter.
         """
-        return self.trash_dir / batch_id / original_path.name
+        base = self.trash_dir / batch_id
+        dest = base / original_path.name
+        # Handle name collisions (same filename from different directories)
+        counter = 1
+        while dest.exists():
+            dest = base / f"{original_path.stem}_{counter}{original_path.suffix}"
+            counter += 1
+        return dest

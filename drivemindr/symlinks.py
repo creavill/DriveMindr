@@ -219,7 +219,8 @@ class AppMigrator:
         try:
             shutil.rmtree(str(source))
         except OSError as exc:
-            logger.error("Failed to remove original: %s", exc)
+            logger.error("Failed to remove original: %s — cleaning up target copy", exc)
+            shutil.rmtree(str(target), ignore_errors=True)
             result["error"] = f"Failed to remove original: {exc}"
             return result
 
