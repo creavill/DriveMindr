@@ -6,7 +6,9 @@ Usage::
     drivemindr scan C:\\
     drivemindr classify --db ./drivemindr.db
     drivemindr dashboard --db ./drivemindr.db
-    drivemindr scan C:\\ --db ./my.db --verbose
+    drivemindr execute --dry-run --db ./drivemindr.db
+    drivemindr execute --db ./drivemindr.db
+    drivemindr undo <batch_id> --db ./drivemindr.db
     drivemindr info --db ./my.db
 
 No network calls. Everything local.
@@ -237,6 +239,125 @@ def dashboard(
     except subprocess.CalledProcessError as exc:
         logger.error("Streamlit exited with code %d", exc.returncode)
         raise typer.Exit(code=1)
+
+
+@app.command()
+def execute(
+    db: str = _db_option,
+    verbose: bool = _verbose_option,
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview actions without making any changes.",
+    ),
+) -> None:
+    """Execute user-approved actions (move, delete, archive).
+
+    Run 'drivemindr scan', 'drivemindr classify', and review in the dashboard
+    first. Use --dry-run to preview what would happen.
+    """
+    from drivemindr.executor import ExecutionEngine
+
+    database = _init(db, verbose)
+
+    mode = "[yellow]DRY RUN[/yellow]" if dry_run else "[bold red]LIVE[/bold red]"
+    console.print(f"\n[bold]DriveMindr v{__version__}[/bold] — execution engine ({mode})\n")
+
+    try:
+        stats = database.get_review_stats()
+        if stats["approved"] == 0:
+            console.print(
+                "[yellow]No approved actions. Review files in the dashboard first.[/yellow]"
+            )
+            raise typer.Exit(code=1)
+
+        console.print(f"  Approved actions: [green]{stats['approved']:,}[/green]\n")
+
+        if not dry_run:
+            console.print(
+                "[bold red]WARNING:[/bold red] This will move and delete files. "
+                "All operations are logged and reversible via undo.\n"
+            )
+            confirm = typer.confirm("Proceed with execution?")
+            if not confirm:
+                console.print("[dim]Aborted.[/dim]")
+                raise typer.Exit(code=0)
+
+        engine = ExecutionEngine(database)
+
+        def _progress(moved: int, deleted: int, archived: int, errors: int) -> None:
+            console.print(
+                f"  Moved [green]{moved}[/green]"
+                f"  |  Deleted [yellow]{deleted}[/yellow]"
+                f"  |  Archived [blue]{archived}[/blue]"
+                f"  |  Errors [red]{errors}[/red]",
+                end="\r",
+            )
+
+        summary = engine.execute_plan(dry_run=dry_run, progress_callback=_progress)
+        console.print()  # newline after progress
+
+        table = Table(title="Execution Summary" + (" (DRY RUN)" if dry_run else ""))
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="right")
+        table.add_row("Moved", format_count(summary["moved"]))
+        table.add_row("Deleted", format_count(summary["deleted"]))
+        table.add_row("Archived", format_count(summary["archived"]))
+        table.add_row("Symlinked", format_count(summary["symlinked"]))
+        table.add_row("Skipped", format_count(summary["skipped"]))
+        table.add_row("Errors", format_count(summary["errors"]))
+        if summary["batch_id"]:
+            table.add_row("Batch ID", summary["batch_id"])
+        console.print(table)
+
+        if not dry_run and summary["batch_id"]:
+            console.print(
+                f"\n  To undo: [cyan]drivemindr undo {summary['batch_id']}[/cyan]\n"
+            )
+
+        logger.info("Execute command completed: %s", summary)
+    except typer.Exit:
+        raise
+    except Exception:
+        logger.exception("Unexpected error during execution")
+        console.print("\n[red]Unexpected error — see drivemindr_debug.log for details.[/red]")
+        raise typer.Exit(code=1)
+    finally:
+        database.close()
+
+
+@app.command()
+def undo(
+    batch_id: str = typer.Argument(..., help="Batch ID to undo (from execute output)."),
+    db: str = _db_option,
+    verbose: bool = _verbose_option,
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview undo without making changes.",
+    ),
+) -> None:
+    """Undo a batch of executed actions."""
+    from drivemindr.undo import UndoManager
+
+    database = _init(db, verbose)
+
+    mode = "[yellow]DRY RUN[/yellow]" if dry_run else "[bold]LIVE[/bold]"
+    console.print(f"\n[bold]DriveMindr v{__version__}[/bold] — undo ({mode})\n")
+
+    try:
+        undo_mgr = UndoManager(database)
+        summary = undo_mgr.undo_batch(batch_id, dry_run=dry_run)
+
+        table = Table(title="Undo Summary" + (" (DRY RUN)" if dry_run else ""))
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="right")
+        table.add_row("Undone", format_count(summary["undone"]))
+        table.add_row("Skipped", format_count(summary["skipped"]))
+        table.add_row("Failed", format_count(summary["failed"]))
+        console.print(table)
+    except Exception:
+        logger.exception("Unexpected error during undo")
+        console.print("\n[red]Unexpected error — see drivemindr_debug.log for details.[/red]")
+        raise typer.Exit(code=1)
+    finally:
+        database.close()
 
 
 @app.command()
